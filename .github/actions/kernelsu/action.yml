@@ -16,18 +16,6 @@ runs:
       run: |
         set -euo pipefail
 
-        retry() {
-          local n=0
-          until [ "$n" -ge 5 ]; do
-            "$@" && return 0
-            n=$((n+1))
-            echo "retry $n/5 failed for: $*" >&2
-            sleep 5
-          done
-          return 1
-        }
-
-        KSU_REPO="https://github.com/KernelSU-Next/KernelSU-Next.git"
         KSU_INPUT="${{ inputs.ksu_branch }}"
 
         if [ -z "$KSU_INPUT" ]; then
@@ -43,44 +31,29 @@ runs:
           "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/v3.3.0/kernel/setup.sh" \
           | bash -s "$KSU_INPUT"
 
-        retry git -C KernelSU-Next/kernel fetch --tags --depth=100 origin "$KSU_INPUT" || true
-        git -C KernelSU-Next/kernel checkout "$KSU_INPUT" || git -C KernelSU-Next/kernel checkout FETCH_HEAD
-
-        cd KernelSU-Next/kernel
-
-        # Force the runtime KernelSU version to 33214
-        # v3.3.0 = 3214 commits + base version 30000
-        KSU_VERSION=33214
-        KSU_GIT_TAG="v3.3.0"
-
-        if grep -q "^KSU_VERSION_FALLBACK :=" Kbuild; then
-          sed -i "s/^KSU_VERSION_FALLBACK := .*/KSU_VERSION_FALLBACK := ${KSU_VERSION}/" Kbuild
-        fi
-
-        if grep -q "^KSU_VERSION_TAG_FALLBACK :=" Kbuild; then
-          sed -i "s/^KSU_VERSION_TAG_FALLBACK := .*/KSU_VERSION_TAG_FALLBACK := ${KSU_GIT_TAG}/" Kbuild
-        fi
-
-        echo "KernelSU-Next configured:"
-        echo "Version: ${KSU_VERSION}"
-        echo "Tag: ${KSU_GIT_TAG}"
+        echo "KernelSU-Next installed using official setup.sh"
 
     - name: Extract KSU Version Info
       id: ksu-version
       shell: bash
       working-directory: ${{ github.workspace }}/kernel/KernelSU-Next
       run: |
+        set -euo pipefail
+
         KSU_GIT_TAG="v3.3.0"
-        KSU_VERSION=33214
-        KSU_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+
+        KSU_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+        COMMITS_COUNT=$(git rev-list --count HEAD 2>/dev/null || echo "3214")
+        KSU_VERSION=$((30000 + COMMITS_COUNT))
 
         echo "KSU_GIT_TAG=$KSU_GIT_TAG" >> "$GITHUB_ENV"
         echo "KSU_VERSION=$KSU_VERSION" >> "$GITHUB_ENV"
         echo "KSU_COMMIT=$KSU_COMMIT" >> "$GITHUB_ENV"
 
-        echo "KSU_GIT_TAG=$KSU_GIT_TAG"
-        echo "KSU_VERSION=$KSU_VERSION"
-        echo "KSU_COMMIT=$KSU_COMMIT"
+        echo "KernelSU-Next info:"
+        echo "Tag: $KSU_GIT_TAG"
+        echo "Version: $KSU_VERSION"
+        echo "Commit: $KSU_COMMIT"
 
     - name: Fix KernelSU-Next
       shell: bash
