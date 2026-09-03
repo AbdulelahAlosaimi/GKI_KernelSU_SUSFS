@@ -1,5 +1,6 @@
 name: Setup pinned root implementation
-description: Clone exactly one supported root implementation at a verified commit
+description: Integrate exactly one supported root implementation at a verified commit
+
 inputs:
   flavor:
     description: 'kernelsu, next, or resukisu'
@@ -19,6 +20,7 @@ runs:
 
         flavor="${{ inputs.flavor }}"
         expected_commit="${{ inputs.commit }}"
+
         case "$flavor" in
           kernelsu)
             repo="https://github.com/tiann/KernelSU.git"
@@ -66,31 +68,76 @@ runs:
           echo "Refusing to replace an existing kernelsu integration." >&2
           exit 1
         fi
+
         if [ -e "$directory" ]; then
           echo "Refusing to reuse an existing root checkout: $directory." >&2
           exit 1
         fi
 
-        git clone --no-checkout "$repo" "$directory"
-        git -C "$directory" fetch --depth=1 origin "$expected_commit"
-        git -C "$directory" checkout --detach "$expected_commit"
+        #
+        # KernelSU-Next:
+        # integrate the repository as a real Git submodule.
+        #
+        if [ "$flavor" = "next" ]; then
+          echo "Adding KernelSU-Next as Git submodule..."
+
+          git submodule add "$repo" "$directory"
+
+          git -C "$directory" fetch origin "$expected_commit"
+          git -C "$directory" checkout --detach "$expected_commit"
+
+          git add .gitmodules "$directory"
+        else
+          git clone --no-checkout "$repo" "$directory"
+          git -C "$directory" fetch --depth=1 origin "$expected_commit"
+          git -C "$directory" checkout --detach "$expected_commit"
+        fi
+
         actual_commit="$(git -C "$directory" rev-parse HEAD)"
+
         if [ "$actual_commit" != "$expected_commit" ]; then
-          echo "Root commit mismatch: expected $expected_commit, got $actual_commit." >&2
+          echo "Root commit mismatch:"
+          echo "Expected: $expected_commit"
+          echo "Actual:   $actual_commit"
           exit 1
         fi
+
         if [ ! -f "$directory/kernel/Kconfig" ] || [ ! -f "$directory/kernel/Makefile" ]; then
           echo "Selected root checkout does not contain a kernel integration." >&2
           exit 1
         fi
+
         root_version="$(git -C "$directory" describe --tags --always --dirty)"
 
         relative_kernel="$(realpath --relative-to="$drivers_dir" "$PWD/$directory/kernel")"
+
         ln -s "$relative_kernel" "$drivers_dir/kernelsu"
+
         grep -q 'obj-$(CONFIG_KSU) += kernelsu/' "$drivers_dir/Makefile" ||
           printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> "$drivers_dir/Makefile"
+
         grep -q 'source "drivers/kernelsu/Kconfig"' "$drivers_dir/Kconfig" ||
           sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' "$drivers_dir/Kconfig"
+
+        echo
+        echo "Root integration:"
+        echo "Implementation: $flavor"
+        echo "Manager:        $manager"
+        echo "Version:        $root_version"
+        echo "Commit:         $actual_commit"
+
+        if [ "$flavor" = "next" ]; then
+          echo
+          echo "Git submodule status:"
+          git submodule status "$directory"
+
+          if ! git ls-files --stage "$directory" | grep -q '^160000 '; then
+            echo "ERROR: KernelSU-Next is not registered as a Git submodule." >&2
+            exit 1
+          fi
+
+          echo "KernelSU-Next verified as Git submodule."
+        fi
 
         echo "ROOT_IMPLEMENTATION=$flavor" >> "$GITHUB_ENV"
         echo "ROOT_MANAGER=$manager" >> "$GITHUB_ENV"
