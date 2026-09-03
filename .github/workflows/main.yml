@@ -229,12 +229,7 @@ jobs:
           RESUKISU_COMMIT="$(pick "$PIN_RESUKISU" https://github.com/ReSukiSU/ReSukiSU.git refs/heads/main)"
           emit ksu_commit "$KERNELSU_COMMIT"
           emit resukisu_commit "$RESUKISU_COMMIT"
-          if [ "${{ inputs.use_susfs }}" = "true" ]; then
-            NEXT_COMMIT="$(resolve_sha https://github.com/pershoot/KernelSU-Next.git refs/heads/dev-susfs)"
-          else
-            NEXT_COMMIT="$(resolve_sha https://github.com/KernelSU-Next/KernelSU-Next.git refs/heads/dev)"
-          fi
-
+          NEXT_COMMIT="$(resolve_sha https://github.com/KernelSU-Next/KernelSU-Next.git refs/tags/v3.3.0)"
           mk_entry() { # flavor variant commit
             printf '{"root_flavor":"%s","variant":"%s","root_commit":"%s"}' "$1" "$2" "$3"
           }
