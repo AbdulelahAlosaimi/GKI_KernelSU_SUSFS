@@ -74,24 +74,11 @@ runs:
           exit 1
         fi
 
-        #
-        # KernelSU-Next:
-        # integrate the repository as a real Git submodule.
-        #
-        if [ "$flavor" = "next" ]; then
-          echo "Adding KernelSU-Next as Git submodule..."
+        echo "Cloning root implementation with full Git history..."
+        git clone "$repo" "$directory"
 
-          git submodule add "$repo" "$directory"
-
-          git -C "$directory" fetch origin "$expected_commit"
-          git -C "$directory" checkout --detach "$expected_commit"
-
-          git add .gitmodules "$directory"
-        else
-          git clone --no-checkout "$repo" "$directory"
-          git -C "$directory" fetch --depth=1 origin "$expected_commit"
-          git -C "$directory" checkout --detach "$expected_commit"
-        fi
+        git -C "$directory" fetch --tags origin
+        git -C "$directory" checkout --detach "$expected_commit"
 
         actual_commit="$(git -C "$directory" rev-parse HEAD)"
 
@@ -108,6 +95,24 @@ runs:
         fi
 
         root_version="$(git -C "$directory" describe --tags --always --dirty)"
+        commit_count="$(git -C "$directory" rev-list --count HEAD)"
+
+        echo
+        echo "Git metadata:"
+        echo "Version:      $root_version"
+        echo "Commit count: $commit_count"
+
+        if [ "$flavor" = "next" ]; then
+          expected_ksu_version=$((30000 + commit_count))
+          echo "KernelSU-Next calculated version: $expected_ksu_version"
+
+          if [ "$expected_commit" = "3b18216f71df189ab3d1b1ce0bdb21be1268e771" ]; then
+            if [ "$expected_ksu_version" != "33214" ]; then
+              echo "ERROR: Expected KernelSU-Next version 33214, got $expected_ksu_version" >&2
+              exit 1
+            fi
+          fi
+        fi
 
         relative_kernel="$(realpath --relative-to="$drivers_dir" "$PWD/$directory/kernel")"
 
@@ -125,19 +130,6 @@ runs:
         echo "Manager:        $manager"
         echo "Version:        $root_version"
         echo "Commit:         $actual_commit"
-
-        if [ "$flavor" = "next" ]; then
-          echo
-          echo "Git submodule status:"
-          git submodule status "$directory"
-
-          if ! git ls-files --stage "$directory" | grep -q '^160000 '; then
-            echo "ERROR: KernelSU-Next is not registered as a Git submodule." >&2
-            exit 1
-          fi
-
-          echo "KernelSU-Next verified as Git submodule."
-        fi
 
         echo "ROOT_IMPLEMENTATION=$flavor" >> "$GITHUB_ENV"
         echo "ROOT_MANAGER=$manager" >> "$GITHUB_ENV"
