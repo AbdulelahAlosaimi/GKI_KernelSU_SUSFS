@@ -5,12 +5,15 @@ inputs:
   android_version:
     description: 'Android version (e.g., android14)'
     required: true
+
   kernel_version:
     description: 'Kernel version (e.g., 5.15, 6.1)'
     required: true
+
   version:
     description: 'Combined version (e.g., android14-6.1)'
     required: true
+
   os_patch_level:
     description: 'OS patch level (e.g., 2024-01)'
     required: true
@@ -19,25 +22,34 @@ outputs:
   deprecated_branch:
     description: 'Whether the kernel branch is deprecated'
     value: ${{ steps.sync.outputs.deprecated }}
+
   tag_fallback:
-    description: 'Release tag used when the branch head was missing upstream'
+    description: 'Release tag used when an exact tag is selected or branch fallback is required'
     value: ${{ steps.sync.outputs.tag_fallback }}
 
 runs:
   using: composite
+
   steps:
     - name: Initialize and Sync Kernel Repository
       id: sync
       shell: bash
       working-directory: ${{ github.workspace }}/kernel
+
       run: |
         set -euo pipefail
 
-        # Derive android and kernel from combined version when available
         VERSION="${{ inputs.version }}"
         ANDROID_PART=$(echo "$VERSION" | cut -d- -f1)
         KERNEL_PART=$(echo "$VERSION" | cut -d- -f2)
         FORMATTED_BRANCH="${ANDROID_PART}-${KERNEL_PART}-${{ inputs.os_patch_level }}"
+
+        echo "======================================================"
+        echo "[+] VERSION          : ${VERSION}"
+        echo "[+] ANDROID_PART     : ${ANDROID_PART}"
+        echo "[+] KERNEL_PART      : ${KERNEL_PART}"
+        echo "[+] FORMATTED_BRANCH : ${FORMATTED_BRANCH}"
+        echo "======================================================"
 
         init_repo() {
           local depth="$1"
@@ -47,6 +59,8 @@ runs:
             depth_flag="--depth=${depth}"
           fi
 
+          echo "[+] Initializing Google kernel manifest..."
+
           repo init \
             -u https://android.googlesource.com/kernel/manifest \
             -b common-${FORMATTED_BRANCH} \
@@ -55,24 +69,31 @@ runs:
               return 1
             }
 
+          DEFAULT_MANIFEST_PATH=".repo/manifests/default.xml"
+
           REMOTE_BRANCH=$(
             git ls-remote \
               https://android.googlesource.com/kernel/common \
-              ${FORMATTED_BRANCH}
-          ) || {
-            echo "ERROR: git ls-remote failed" >&2
-            return 1
-          }
+              "refs/heads/${FORMATTED_BRANCH}" \
+              2>/dev/null || true
+          )
 
-          DEFAULT_MANIFEST_PATH=.repo/manifests/default.xml
+          DEPRECATED_BRANCH=$(
+            git ls-remote \
+              https://android.googlesource.com/kernel/common \
+              "refs/heads/deprecated/${FORMATTED_BRANCH}" \
+              2>/dev/null || true
+          )
+
           DEPRECATED=false
 
-          if grep -q deprecated <<< "$REMOTE_BRANCH"; then
+          if [ -z "$REMOTE_BRANCH" ] && [ -n "$DEPRECATED_BRANCH" ]; then
+            echo "[!] Branch ${FORMATTED_BRANCH} is deprecated."
+
             sed -i \
-              "s/\"${FORMATTED_BRANCH}\"/\"deprecated\/${FORMATTED_BRANCH}\"/g" \
+              "s|revision=\"${FORMATTED_BRANCH}\"|revision=\"deprecated/${FORMATTED_BRANCH}\"|g" \
               "$DEFAULT_MANIFEST_PATH"
 
-            echo "[!] Note: Branch ${FORMATTED_BRANCH} is considered deprecated."
             DEPRECATED=true
           fi
 
@@ -80,45 +101,8 @@ runs:
 
           TAG_FALLBACK=""
 
-          # ==========================================================
-          # itel A675L exact GKI base
-          #
-          # Stock kernel:
-          # 5.15.189-android13-8-00013-gaa2747a3794a-ab14413887
-          #
-          # Google GKI tag:
-          # android13-5.15-2025-09_r8
-          #
-          # kernel/common commit:
-          # aa2747a3794a9708575639d3e287b6dc91331dee
-          #
-          # Build ID:
-          # 14413887
-          # ==========================================================
-          if [ "$FORMATTED_BRANCH" = "android13-5.15-2025-09" ]; then
-
-            PINNED_TAG="android13-5.15-2025-09_r8"
-
-            echo "======================================================"
-            echo "[+] itel A675L build detected"
-            echo "[+] Kernel branch : ${FORMATTED_BRANCH}"
-            echo "[+] Pinning GKI    : ${PINNED_TAG}"
-            echo "[+] Expected SHA   : aa2747a3794a9708575639d3e287b6dc91331dee"
-            echo "[+] Expected BID   : 14413887"
-            echo "======================================================"
-
-            sed -i \
-              "/path=\"common\"/ s/revision=\"[^\"]*\"/revision=\"${PINNED_TAG}\"/" \
-              "$DEFAULT_MANIFEST_PATH"
-
-            TAG_FALLBACK="$PINNED_TAG"
-
-          elif [ "$DEPRECATED" = "false" ] && [ -z "$REMOTE_BRANCH" ]; then
-
-            # Google retires old monthly heads entirely
-            # (neither live nor deprecated/).
-            # Fall back to the latest immutable release tag.
-
+          # Generic fallback for deleted monthly branches.
+          if [ "$DEPRECATED" = "false" ] && [ -z "$REMOTE_BRANCH" ]; then
             LATEST_TAG=$(
               git ls-remote \
                 https://android.googlesource.com/kernel/common \
@@ -134,19 +118,16 @@ runs:
             )
 
             if [ -n "$LATEST_TAG" ]; then
-
-              echo "[!] Note: Branch ${FORMATTED_BRANCH} head missing upstream; using tag ${LATEST_TAG}."
+              echo "[!] Branch head missing; fallback tag found: ${LATEST_TAG}"
 
               sed -i \
-                "/path=\"common\"/ s/revision=\"${FORMATTED_BRANCH}\"/revision=\"${LATEST_TAG}\"/" \
+                "/path=\"common\"/ s|revision=\"[^\"]*\"|revision=\"refs/tags/${LATEST_TAG}\"|" \
                 "$DEFAULT_MANIFEST_PATH"
 
               TAG_FALLBACK="$LATEST_TAG"
-
             else
-
-              echo "WARNING: no head or tag found for ${FORMATTED_BRANCH}; sync will likely fail." >&2
-
+              echo "ERROR: no branch or fallback tag found for ${FORMATTED_BRANCH}" >&2
+              return 1
             fi
           fi
 
@@ -156,39 +137,35 @@ runs:
         MAX_RETRIES=3
         RETRY_DELAY_SHORT=15
         SYNC_TIMEOUT="15m"
-        attempt=1
-
-        # Always shallow: the build only needs the branch tip.
-        # Deeper retries just download more data into a strained runner.
         DEPTHS=(1 1 1)
+        attempt=1
 
         clean_workspace() {
           echo "Disk before cleanup:"
           df -h "$PWD" | tail -n +2 || true
 
-          # Remove repo metadata AND any half-checked-out project dirs
-          # from the previous attempt.
-          find "$PWD" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+          find "$PWD" \
+            -mindepth 1 \
+            -maxdepth 1 \
+            -exec rm -rf {} +
 
           echo "Disk after cleanup:"
           df -h "$PWD" | tail -n +2 || true
         }
 
         while [ $attempt -le $MAX_RETRIES ]; do
-
           CURRENT_DEPTH="${DEPTHS[$((attempt-1))]}"
 
-          echo "Attempt $attempt/$MAX_RETRIES: initialize and sync kernel repository (depth=${CURRENT_DEPTH}, sync timeout $SYNC_TIMEOUT)..."
-
-          df -h "$PWD" | tail -n +2 || true
+          echo ""
+          echo "======================================================"
+          echo "[+] Sync attempt $attempt/$MAX_RETRIES"
+          echo "[+] Depth: ${CURRENT_DEPTH}"
+          echo "======================================================"
 
           if init_repo "$CURRENT_DEPTH"; then
-
-            # Normally avoid fetching tags.
-            # When a pinned/fallback tag is used, tags must be available.
             SYNC_TAG_FLAGS="--no-tags"
 
-            if [ -n "$TAG_FALLBACK" ]; then
+            if [ -n "${TAG_FALLBACK:-}" ]; then
               SYNC_TAG_FLAGS=""
             fi
 
@@ -201,135 +178,157 @@ runs:
                 --jobs-checkout=4 \
                 -j4; then
 
-              echo "Kernel repository initialization and sync succeeded on attempt $attempt."
+              echo ""
+              echo "======================================================"
+              echo "[+] Repository sync completed successfully"
+              echo "======================================================"
               break
-
             else
-
               rc=$?
 
-              if [ $rc -eq 124 ]; then
-                echo "repo sync timed out after $SYNC_TIMEOUT."
+              if [ "$rc" -eq 124 ]; then
+                echo "ERROR: repo sync timed out after ${SYNC_TIMEOUT}" >&2
               else
-                echo "repo sync failed with exit code $rc."
+                echo "ERROR: repo sync failed with exit code ${rc}" >&2
               fi
-
             fi
-
           else
-
             rc=$?
-            echo "repo init or branch preflight failed with exit code $rc."
-
+            echo "ERROR: repo initialization failed with exit code ${rc}" >&2
           fi
 
           if [ $attempt -lt $MAX_RETRIES ]; then
-
-            echo "Cleaning workspace and retrying after ${RETRY_DELAY_SHORT}s..."
-
+            echo "[!] Cleaning workspace and retrying..."
             clean_workspace || true
-
             sleep "$RETRY_DELAY_SHORT"
-
           else
-
-            echo "All $MAX_RETRIES attempts failed." >&2
+            echo "ERROR: all $MAX_RETRIES sync attempts failed" >&2
             exit "$rc"
-
           fi
 
           attempt=$((attempt+1))
         done
 
-    # --- Non-repo steps (commented out; we only use repo now) ---
-    #
-    # - name: Download manifest.xml for branch (with deprecated fallback)
-    #   shell: bash
-    #   working-directory: ${{ github.workspace }}/kernel
-    #   run: |
-    #     set -euo pipefail
-    #
-    #     VERSION="${{ inputs.version }}"
-    #     ANDROID_PART=$(echo "$VERSION" | cut -d- -f1)
-    #     KERNEL_PART=$(echo "$VERSION" | cut -d- -f2)
-    #     FORMATTED_BRANCH="${ANDROID_PART}-${KERNEL_PART}-${{ inputs.os_patch_level }}"
-    #
-    #     MAIN_MANIFEST_URL="https://android.googlesource.com/kernel/manifest/+/refs/heads/common-${FORMATTED_BRANCH}/default.xml?format=TEXT"
-    #     DEPRECATED_MANIFEST_URL="https://android.googlesource.com/kernel/manifest/+/refs/heads/deprecated/common-${FORMATTED_BRANCH}/default.xml?format=TEXT"
-    #
-    #     echo "Trying to fetch manifest from $MAIN_MANIFEST_URL"
-    #
-    #     if curl -fsSL "$MAIN_MANIFEST_URL" | base64 -d > manifest.xml; then
-    #
-    #       echo "Fetched manifest from $MAIN_MANIFEST_URL"
-    #
-    #     else
-    #
-    #       echo "Main manifest fetch failed, trying deprecated branch."
-    #       echo "[!] Note: Branch common-${FORMATTED_BRANCH} is considered deprecated."
-    #
-    #       if curl -fsSL "$DEPRECATED_MANIFEST_URL" | base64 -d > manifest.xml; then
-    #
-    #         echo "Fetched manifest from $DEPRECATED_MANIFEST_URL"
-    #
-    #       else
-    #
-    #         echo "ERROR: Neither main nor deprecated branch exists for $FORMATTED_BRANCH" >&2
-    #         exit 22
-    #
-    #       fi
-    #     fi
-    #
-    # - name: Debug Show manifest.xml
-    #   shell: bash
-    #   working-directory: ${{ github.workspace }}/kernel
-    #   run: cat manifest.xml
-    #
-    # - name: Fast Parallel Archive Download
-    #   shell: bash
-    #   working-directory: ${{ github.workspace }}/kernel
-    #   run: |
-    #     python "${{ github.workspace }}/.github/actions/download-kernel/fast_parallel_download.py"
+        # ==========================================================
+        # itel A675L exact GKI r8 pin
+        # ==========================================================
+
+        if [ "$FORMATTED_BRANCH" = "android13-5.15-2025-09" ]; then
+          PINNED_TAG="android13-5.15-2025-09_r8"
+          PINNED_REF="refs/tags/${PINNED_TAG}"
+          EXPECTED_SHA="aa2747a3794a9708575639d3e287b6dc91331dee"
+
+          echo ""
+          echo "======================================================"
+          echo "[+] itel A675L exact GKI target detected"
+          echo "[+] Target tag   : ${PINNED_TAG}"
+          echo "[+] Target ref   : ${PINNED_REF}"
+          echo "[+] Expected SHA : ${EXPECTED_SHA}"
+          echo "[+] Expected BID : 14413887"
+          echo "======================================================"
+
+          if [ ! -d common ]; then
+            echo "ERROR: kernel/common directory does not exist" >&2
+            exit 1
+          fi
+
+          cd common
+
+          echo "[+] Fetching exact GKI r8 tag..."
+
+          git fetch \
+            --depth=1 \
+            https://android.googlesource.com/kernel/common \
+            "${PINNED_REF}" || {
+              echo "ERROR: failed to fetch ${PINNED_REF}" >&2
+              exit 1
+            }
+
+          echo "[+] Checking out exact r8 commit..."
+
+          git checkout --detach FETCH_HEAD || {
+            echo "ERROR: failed to checkout ${PINNED_TAG}" >&2
+            exit 1
+          }
+
+          ACTUAL_SHA=$(git rev-parse HEAD)
+
+          echo ""
+          echo "[+] kernel/common HEAD after r8 checkout:"
+          echo "    ${ACTUAL_SHA}"
+
+          if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+            echo ""
+            echo "======================================================" >&2
+            echo "ERROR: wrong kernel/common commit" >&2
+            echo "Expected: ${EXPECTED_SHA}" >&2
+            echo "Actual  : ${ACTUAL_SHA}" >&2
+            echo "======================================================" >&2
+            exit 1
+          fi
+
+          echo ""
+          echo "======================================================"
+          echo "[+] SUCCESS"
+          echo "[+] Exact itel A675L GKI r8 base confirmed"
+          echo "[+] Tag : ${PINNED_TAG}"
+          echo "[+] SHA : ${ACTUAL_SHA}"
+          echo "[+] BID : 14413887"
+          echo "======================================================"
+
+          echo "KERNEL_SOURCE_COMMIT=${ACTUAL_SHA}" >> "$GITHUB_ENV"
+          echo "tag_fallback=${PINNED_TAG}" >> "$GITHUB_OUTPUT"
+
+          cd ..
+        fi
+
 
     - name: Capture Kernel Common Commit Metadata
       shell: bash
       working-directory: ${{ github.workspace }}/kernel
+
       run: |
         set -euo pipefail
 
-        if [[ ! -d common ]]; then
-          echo "WARNING: common folder not found; skipping commit metadata capture."
-          exit 0
+        if [ ! -d common ]; then
+          echo "ERROR: common directory not found" >&2
+          exit 1
         fi
 
         cd common
-
-        if [[ ! -d .git ]]; then
-          echo "WARNING: common is not a git checkout; skipping commit metadata capture."
-          exit 0
-        fi
 
         COMMIT_DATE=$(git log -1 --format=%cI)
         COMMIT_MSG=$(git log -1 --format=%s)
         COMMIT_SHA=$(git rev-parse HEAD)
 
-        echo "KERNEL_SOURCE_COMMIT=$COMMIT_SHA" >> "$GITHUB_ENV"
+        echo "KERNEL_SOURCE_COMMIT=${COMMIT_SHA}" >> "$GITHUB_ENV"
 
-        echo "Kernel common commit date: $COMMIT_DATE"
-        echo "Kernel common commit msg: $COMMIT_MSG"
-        echo "Kernel common commit SHA: $COMMIT_SHA"
+        echo ""
+        echo "======================================================"
+        echo "Kernel common commit date : ${COMMIT_DATE}"
+        echo "Kernel common commit msg  : ${COMMIT_MSG}"
+        echo "Kernel common commit SHA  : ${COMMIT_SHA}"
+        echo "======================================================"
 
-        EXPECTED_SHA="aa2747a3794a9708575639d3e287b6dc91331dee"
+        if [ "${{ inputs.version }}" = "android13-5.15" ] && \
+           [ "${{ inputs.os_patch_level }}" = "2025-09" ]; then
 
-        if [ "$COMMIT_SHA" = "$EXPECTED_SHA" ]; then
-          echo "======================================================"
-          echo "[+] SUCCESS: Exact itel A675L GKI r8 base confirmed."
-          echo "[+] SHA: $COMMIT_SHA"
-          echo "======================================================"
-        else
-          echo "======================================================" >&2
-          echo "[!] WARNING: Kernel source does not match expected r8." >&2
-          echo "[!] Expected: $EXPECTED_SHA" >&2
-          echo "[!] Actual:   $COMMIT_SHA" >&2
-          echo "======================================================" >&2
+          EXPECTED_SHA="aa2747a3794a9708575639d3e287b6dc91331dee"
+
+          if [ "$COMMIT_SHA" = "$EXPECTED_SHA" ]; then
+            echo ""
+            echo "======================================================"
+            echo "[+] FINAL VERIFICATION PASSED"
+            echo "[+] Exact A675L GKI r8 source is active"
+            echo "[+] SHA: ${COMMIT_SHA}"
+            echo "======================================================"
+          else
+            echo ""
+            echo "======================================================" >&2
+            echo "ERROR: final r8 verification failed" >&2
+            echo "Expected: ${EXPECTED_SHA}" >&2
+            echo "Actual  : ${COMMIT_SHA}" >&2
+            echo "======================================================" >&2
+            exit 1
+          fi
         fi
