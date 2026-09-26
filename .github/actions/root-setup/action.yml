@@ -1,50 +1,60 @@
 name: Setup pinned root implementation
 description: Clone exactly one supported root implementation at a verified commit
+
 inputs:
   flavor:
     description: 'kernelsu, next, resukisu, sukisu-ultra, or kowsu'
     required: true
+
   commit:
     description: 'Full immutable commit SHA'
     required: true
 
 runs:
   using: composite
+
   steps:
     - name: Clone and integrate selected root
       shell: bash
       working-directory: ${{ github.workspace }}/kernel
+
       run: |
         set -euo pipefail
 
         flavor="${{ inputs.flavor }}"
         expected_commit="${{ inputs.commit }}"
+
         case "$flavor" in
           kernelsu)
             repo="https://github.com/tiann/KernelSU.git"
             directory="KernelSU"
             manager="KernelSU Manager"
             ;;
+
           next)
             repo="https://github.com/KernelSU-Next/KernelSU-Next.git"
             directory="KernelSU-Next"
             manager="KernelSU Next Manager"
             ;;
+
           resukisu)
             repo="https://github.com/ReSukiSU/ReSukiSU.git"
             directory="ReSukiSU"
             manager="ReSukiSU Manager"
             ;;
+
           sukisu-ultra)
             repo="https://github.com/SukiSU-Ultra/SukiSU-Ultra.git"
             directory="SukiSU-Ultra"
             manager="SukiSU-Ultra Manager"
             ;;
+
           kowsu)
             repo="https://github.com/KOWX712/KernelSU.git"
             directory="KowSU"
             manager="KowSU Manager"
             ;;
+
           *)
             echo "Unsupported root flavor: $flavor" >&2
             exit 2
@@ -55,6 +65,12 @@ runs:
           echo "Root commit must be a full 40-character SHA." >&2
           exit 2
         fi
+
+        echo "=============================================="
+        echo "Root flavor : $flavor"
+        echo "Repository  : $repo"
+        echo "Commit      : $expected_commit"
+        echo "=============================================="
 
         for candidate in KernelSU KernelSU-Next ReSukiSU SukiSU-Ultra KowSU; do
           if [ "$candidate" != "$directory" ] && [ -e "$candidate" ]; then
@@ -76,42 +92,152 @@ runs:
           echo "Refusing to replace an existing kernelsu integration." >&2
           exit 1
         fi
+
         if [ -e "$directory" ]; then
           echo "Refusing to reuse an existing root checkout: $directory." >&2
           exit 1
         fi
 
+        echo "Cloning root implementation..."
+
         git clone --no-checkout "$repo" "$directory"
-        git -C "$directory" fetch --depth=1 origin "$expected_commit"
-        git -C "$directory" checkout --detach "$expected_commit"
+
+        git -C "$directory" fetch \
+          --depth=1 \
+          origin \
+          "$expected_commit"
+
+        git -C "$directory" checkout \
+          --detach \
+          "$expected_commit"
+
         actual_commit="$(git -C "$directory" rev-parse HEAD)"
+
         if [ "$actual_commit" != "$expected_commit" ]; then
-          echo "Root commit mismatch: expected $expected_commit, got $actual_commit." >&2
+          echo "Root commit mismatch." >&2
+          echo "Expected: $expected_commit" >&2
+          echo "Actual  : $actual_commit" >&2
           exit 1
         fi
-        if [ ! -f "$directory/kernel/Kconfig" ] || [ ! -f "$directory/kernel/Makefile" ]; then
+
+        if [ ! -f "$directory/kernel/Kconfig" ] || \
+           [ ! -f "$directory/kernel/Makefile" ]; then
+
           echo "Selected root checkout does not contain a kernel integration." >&2
           exit 1
         fi
+
         root_version="$(git -C "$directory" describe --tags --always --dirty)"
 
-        relative_kernel="$(realpath --relative-to="$drivers_dir" "$PWD/$directory/kernel")"
-        ln -s "$relative_kernel" "$drivers_dir/kernelsu"
-        grep -q 'obj-$(CONFIG_KSU) += kernelsu/' "$drivers_dir/Makefile" ||
-          printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> "$drivers_dir/Makefile"
-        grep -q 'source "drivers/kernelsu/Kconfig"' "$drivers_dir/Kconfig" ||
-          sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' "$drivers_dir/Kconfig"
+        echo "=============================================="
+        echo "Root source successfully checked out"
+        echo "Version : $root_version"
+        echo "Commit  : $actual_commit"
+        echo "=============================================="
+
+        # ==========================================================
+        # KernelSU-Next v3.4.0 / 33294
+        # ==========================================================
+
+        if [ "$flavor" = "next" ]; then
+
+          KBUILD_FILE="$directory/kernel/Kbuild"
+
+          echo "=============================================="
+          echo "Configuring KernelSU-Next v3.4.0 / 33294"
+          echo "=============================================="
+
+          # Verify we are using the exact KernelSU-Next source
+          # expected for v3.4.0 / 33294.
+          EXPECTED_KSU_NEXT_COMMIT="1a879d6a866f80b1fa1c1009a2ffa747873cbb5e"
+
+          if [ "$actual_commit" != "$EXPECTED_KSU_NEXT_COMMIT" ]; then
+            echo "ERROR: Wrong KernelSU-Next source commit." >&2
+            echo "Expected: $EXPECTED_KSU_NEXT_COMMIT" >&2
+            echo "Actual  : $actual_commit" >&2
+            exit 1
+          fi
+
+          echo "[+] Exact KernelSU-Next v3.4.0 source confirmed."
+
+          if [ ! -f "$KBUILD_FILE" ]; then
+            echo "ERROR: KernelSU-Next Kbuild not found:" >&2
+            echo "$KBUILD_FILE" >&2
+            exit 1
+          fi
+
+          # Force the kernel-side KernelSU version to 33294.
+          if grep -q '^KSU_VERSION_FALLBACK :=' "$KBUILD_FILE"; then
+
+            sed -i \
+              's/^KSU_VERSION_FALLBACK := .*/KSU_VERSION_FALLBACK := 33294/' \
+              "$KBUILD_FILE"
+
+          else
+
+            echo "" >> "$KBUILD_FILE"
+            echo "KSU_VERSION_FALLBACK := 33294" >> "$KBUILD_FILE"
+
+          fi
+
+          # Force the fallback tag to v3.4.0 when supported.
+          if grep -q '^KSU_VERSION_TAG_FALLBACK :=' "$KBUILD_FILE"; then
+
+            sed -i \
+              's/^KSU_VERSION_TAG_FALLBACK := .*/KSU_VERSION_TAG_FALLBACK := v3.4.0/' \
+              "$KBUILD_FILE"
+
+          fi
+
+          echo ""
+          echo "KernelSU-Next Kbuild version settings:"
+          grep -E \
+            '^(KSU_VERSION_FALLBACK|KSU_VERSION_TAG_FALLBACK)[[:space:]]*:=' \
+            "$KBUILD_FILE" || true
+
+          echo ""
+          echo "=============================================="
+          echo "[+] KernelSU-Next source : v3.4.0"
+          echo "[+] KernelSU version     : 33294"
+          echo "[+] Commit               : $actual_commit"
+          echo "=============================================="
+        fi
+
+        relative_kernel="$(
+          realpath \
+            --relative-to="$drivers_dir" \
+            "$PWD/$directory/kernel"
+        )"
+
+        ln -s \
+          "$relative_kernel" \
+          "$drivers_dir/kernelsu"
+
+        grep -q \
+          'obj-$(CONFIG_KSU) += kernelsu/' \
+          "$drivers_dir/Makefile" || \
+          printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' \
+          >> "$drivers_dir/Makefile"
+
+        grep -q \
+          'source "drivers/kernelsu/Kconfig"' \
+          "$drivers_dir/Kconfig" || \
+          sed -i \
+            '/endmenu/i source "drivers/kernelsu/Kconfig"' \
+            "$drivers_dir/Kconfig"
 
         echo "ROOT_IMPLEMENTATION=$flavor" >> "$GITHUB_ENV"
         echo "ROOT_MANAGER=$manager" >> "$GITHUB_ENV"
         echo "ROOT_VERSION=$root_version" >> "$GITHUB_ENV"
         echo "ROOT_COMMIT=$actual_commit" >> "$GITHUB_ENV"
 
+
     - name: Enable root configuration
       uses: ./.github/actions/set-kernel-config
       with:
         config_list: |
           CONFIG_KSU=y
+
 
     - name: Disable multi-manager for ReSukiSU
       if: inputs.flavor == 'resukisu'
