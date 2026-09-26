@@ -268,19 +268,11 @@ jobs:
           # (it can only ever run with SUSFS off — enforced below).
           KOWSU_COMMIT="$(resolve_sha https://github.com/KOWX712/KernelSU.git refs/heads/master)"
           emit kowsu_commit "$KOWSU_COMMIT"
-        if [ "${{ inputs.use_susfs }}" = "true" ]; then
+          # KernelSU-Next kernel side pinned to official v3.4.0 / KSU 33294
+          # Full SHA is required because emit() only accepts 40-character SHAs.
+          NEXT_COMMIT="1a879d6a866f80b1fa1c1009a2ffa747873cbb5e"
+          echo "Pinned KernelSU-Next kernel commit: $NEXT_COMMIT"
 
-# Pin KernelSU-Next kernel side to v3.4.0 / 33294
-NEXT_COMMIT="1a879d6"
-
-else
-
-# Keep the same v3.4.0 / 33294 base even without SUSFS
-NEXT_COMMIT="1a879d6"
-
-fi
-
-echo "Pinned KernelSU-Next commit: $NEXT_COMMIT"
 
           mk_entry() { # flavor variant commit
             printf '{"root_flavor":"%s","variant":"%s","root_commit":"%s"}' "$1" "$2" "$3"
